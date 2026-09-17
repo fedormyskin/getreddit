@@ -1,5 +1,5 @@
 from utilities import *
-from getcontents import filter_files, resolve_input_files, TEXT_FIELDS
+from getcontents import filter_files, resolve_input_files, split_remote, TEXT_FIELDS
 # getsubreddits (browser scraping) and splitcontents (spaCy) are imported only by the modes
 # that need them, so filtering does not require those dependencies and worker processes stay light.
 import argparse
@@ -8,9 +8,10 @@ import os
 import re
 import pandas as pd
 
-# Whether input_path points at Reddit dump(s): a .zst file, a folder with .zst files, or a glob pattern
+# Whether input_path points at Reddit dump(s): a .zst file, a folder with .zst files, or a glob pattern,
+# on this machine or on another one reachable with ssh (user@server:/path)
 def is_zst_input(input_path):
-    if '.zst' in input_path:
+    if '.zst' in input_path or split_remote(input_path):
         return True
     return os.path.isdir(input_path) and len(glob.glob(os.path.join(input_path, "*.zst"))) > 0
 
@@ -112,7 +113,10 @@ def main(args):
                      match_mode=args.match_mode or None,workers=args.workers,verbose=args.verbose == "yes")
         if delete_file == "yes":
             for file_path in files:
-                remove(file_path)
+                if split_remote(file_path):
+                    print(f"{file_path} is on another machine and is not removed.")
+                else:
+                    remove(file_path)
             print("The entire process to collect and/or filter the Reddit data has been done.")
         else:
             print("The entire process to collect and/or filter the Reddit data has been done.")
@@ -178,7 +182,7 @@ if __name__ == "__main__":
         type=str, default=""
     )
     parser.add_argument(
-        "--input_path", help="The folder path to store the original downloaded file (mode 'download'), or the downloaded .zst file that you want to filter, a folder containing several .zst files, or a glob pattern such as '/data/RC_2022-*.zst' (mode 'filter'), or the folder path which contain the list of filtered data that you want to split based on the sentence (mode 'split').",
+        "--input_path", help="The folder path to store the original downloaded file (mode 'download'), or the downloaded .zst file that you want to filter, a folder containing several .zst files, or a glob pattern such as '/data/RC_2022-*.zst' (mode 'filter'; the files may be on another machine reachable with ssh, e.g. 'user@server:/data/dumps/', they are then read over ssh and filtered here without installing anything there), or the folder path which contain the list of filtered data that you want to split based on the sentence (mode 'split').",
         type=str, default=""
     )
     parser.add_argument(

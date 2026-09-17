@@ -25,7 +25,10 @@ import glob
 import json
 import os
 import queue
+import re
+import shlex
 import string
+import subprocess
 import sys
 import threading
 import time
@@ -75,8 +78,70 @@ def detect_reddit_type(file_path):
     )
 
 
+# scp-style path of a file on another machine: [user@]host:/absolute/path
+_REMOTE_PATH = re.compile(r"^((?:[\w.-]+@)?[\w.-]+):(?!//)(/.*)$")
+
+
+def split_remote(path):
+    """('[user@]host', '/remote/path') for a path like user@server:/data/RC_2022-10.zst, else None."""
+    match = _REMOTE_PATH.match(path)
+    return (match.group(1), match.group(2)) if match else None
+
+
+class _RemoteFile:
+    """Read-only stream of a file on another machine, through `ssh host cat path`.
+
+    Nothing is installed or written on the other machine; the compressed bytes
+    are decompressed and filtered here. Use SSH keys or a ControlMaster
+    connection so that no password is asked for every file.
+    """
+
+    def __init__(self, host, path):
+        self.name = f"{host}:{path}"
+        self._eof = False
+        self._proc = subprocess.Popen(
+            ["ssh", host, "cat " + shlex.quote(path)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+
+    def read(self, n):
+        data = self._proc.stdout.read(n)
+        if not data:
+            self._eof = True
+        return data
+
+    def close(self):
+        proc = self._proc
+        if not self._eof:  # the reader stopped early: just stop the transfer
+            proc.kill()
+        proc.stdout.close()
+        error = proc.stderr.read().decode("utf-8", "replace").strip()
+        proc.stderr.close()
+        code = proc.wait()
+        if self._eof and code != 0:
+            raise IOError(f"Cannot read {self.name} over ssh (exit code {code}): {error or 'no error message'}")
+
+
 def resolve_input_files(input_path):
-    """Expand a .zst file, a folder holding .zst files, or a glob pattern into a sorted file list."""
+    """Expand a .zst file, a folder holding .zst files, or a glob pattern into a sorted file list.
+
+    The path may be on another machine reachable with ssh: user@server:/data/RC_2022-10.zst,
+    user@server:/data/dumps/ or 'user@server:/data/RC_2022-*.zst'.
+    """
+    remote = split_remote(input_path)
+    if remote:
+        host, path = remote
+        if any(ch in path for ch in "*?["):
+            command = "ls -1d " + path  # the remote shell expands the pattern
+        elif path.endswith(".zst"):
+            return [input_path]
+        else:
+            command = "ls -1d " + shlex.quote(path.rstrip("/")) + "/*.zst"
+        result = subprocess.run(["ssh", host, command], stdin=subprocess.DEVNULL, capture_output=True, text=True)
+        files = sorted(line.strip() for line in result.stdout.splitlines() if line.strip().endswith(".zst"))
+        if result.returncode != 0 or not files:
+            raise ValueError(f"No .zst file found for {input_path} on {host}: {result.stderr.strip() or 'nothing listed'}")
+        return [f"{host}:{f}" for f in files]
     if os.path.isdir(input_path):
         files = sorted(glob.glob(os.path.join(input_path, "*.zst")))
         if not files:
@@ -223,11 +288,13 @@ def _iter_chunks(file_path, chunk_size):
     silently returning a part of the data.
     """
     dctx = zstandard.ZstdDecompressor(max_window_size=2 ** 31)
-    with open(file_path, "rb") as fh:
+    remote = split_remote(file_path)
+    source = _RemoteFile(*remote) if remote else open(file_path, "rb")
+    try:
         dobj = dctx.decompressobj(write_size=chunk_size)
         in_frame = False
         while True:
-            data = fh.read(READ_SIZE)
+            data = source.read(READ_SIZE)
             if not data:
                 break
             while data:
@@ -240,6 +307,8 @@ def _iter_chunks(file_path, chunk_size):
                 data = dobj.unused_data  # start of the next frame, if any
                 dobj = dctx.decompressobj(write_size=chunk_size)
                 in_frame = False
+    finally:
+        source.close()  # for a remote file this also reports a failed transfer
     if in_frame:
         raise ValueError(f"{file_path} is truncated or corrupt: the compressed data ends in the middle of a zstd frame.")
 

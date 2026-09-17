@@ -28,6 +28,8 @@ $ python getreddit.py --input_path /Users/username/folder/input_folder/ --output
 ```
 Each worker needs up to 2 GB of memory to decompress a Reddit dump (they are compressed with a 2 GB zstd window), plus the memory of the records it keeps.
 
+The `.zst` files may also be on another machine that you can reach with `ssh`, without installing anything there: give the `input_path` as `user@server:/path/to/dumps/` (a file, a folder, or a glob pattern; absolute paths). Each file is then streamed with `ssh user@server cat ...` and decompressed and filtered on your machine, where the output files are written. Set up SSH keys or a `ControlMaster` connection so that you are not asked for a password for every file, and keep `--workers` low (1 or 2) since the connection bandwidth is shared.
+
 Subreddit names are matched exactly (`programming` does not match `learnprogramming`), ignoring the case of ASCII letters; a leading `r/` is accepted. Filters on text attributes (`body`, `title`, `selftext`) match substrings instead, also ignoring the case, and underscores in the `filter_list` stand for spaces (`climate_change`). Use `--match_mode exact` or `--match_mode contains` to override these defaults. The original `.zst` files that you saved are kept unless you pass `--delete_file yes`.
 
 Filtering is done on the compressed file directly and it does not need much memory: a month of comments (~250 GB of JSON once decompressed) is scanned at a few hundred MB/s on a single core, so a subreddit filter takes roughly 10-20 minutes per file instead of hours. Installing `orjson` (in `requirements.txt`) makes parsing the matching records faster; the script works without it.
