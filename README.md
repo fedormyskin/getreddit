@@ -22,6 +22,15 @@ Suppose that you have downloaded the October 2022 Reddit comment (https://files.
 ```
 $ python getreddit.py --input_path /Users/username/folder/input_folder/RC_2022-10.zst --output_path /Users/username/folder/filtered/ --filter_list olympics,programming --attribute_list id,subreddit,author,body
 ```
+The `input_path` can also be a folder that contains several `.zst` files, or a glob pattern such as `'/Users/username/folder/input_folder/RC_2022-*.zst'`. Every file is filtered independently and produces its own output files (e.g. `subreddit_olympics_RC_2022-10.pickle`), so you can process several files at the same time with `--workers`:
+```
+$ python getreddit.py --input_path /Users/username/folder/input_folder/ --output_path /Users/username/folder/filtered/ --filter_list olympics,programming --workers 4
+```
+Each worker needs up to 2 GB of memory to decompress a Reddit dump (they are compressed with a 2 GB zstd window), plus the memory of the records it keeps.
+
+Subreddit names are matched exactly (`programming` does not match `learnprogramming`), ignoring the case of ASCII letters; a leading `r/` is accepted. Filters on text attributes (`body`, `title`, `selftext`) match substrings instead, also ignoring the case, and underscores in the `filter_list` stand for spaces (`climate_change`). Use `--match_mode exact` or `--match_mode contains` to override these defaults. The original `.zst` files that you saved are kept unless you pass `--delete_file yes`.
+
+Filtering is done on the compressed file directly and it does not need much memory: a month of comments (~250 GB of JSON once decompressed) is scanned at a few hundred MB/s on a single core, so a subreddit filter takes roughly 10-20 minutes per file instead of hours. Installing `orjson` (in `requirements.txt`) makes parsing the matching records faster; the script works without it.
 ## Example to use the `split` `mode`
 Suppose that you already collect your filtered Reddit comments (e.g. filtered by subreddit or by keyword applied on attribute `body`), saved in `/Users/username/folder/filtered/`, and you want to split all those comments files sentence by sentence then saved the splitted comments in `/Users/username/folder/splitted/`, here is the minimum script that you need to run:
 ```
@@ -32,7 +41,7 @@ $ python getreddit.py --input_path /Users/username/folder/filtered/ --output_pat
 To use `GetReddit` as package library, simply call them by scripting `from getreddit import *` in your python file. Specify `*` with the specific function you need to be integrated with your python script.
 
 # Limitation
-This library is created for research needs, where the main purpose is just to collect the dataset without considering the runtime. The main limitation of this library is the filter process is done sequentially so that it may very slow. Therefore, it may not fit if you want to apply this library for production cases. Any modification and contribution to improving this library is more than welcome :) 
+This library is created for research needs, where the main purpose is just to collect the dataset. The `filter` mode scans the raw bytes of each record and only parses the JSON of the records that can match, so it is limited by the zstd decompression speed of one core per file; filtering on a text attribute (`body`, `title`, `selftext`) additionally scans every record for each keyword, so it gets slower with long keyword lists. All records matched by a filter are kept in memory until the output file is written, so filtering a very popular subreddit from a month of comments needs a few GB of memory. The `split` mode is still sequential. Any modification and contribution to improving this library is more than welcome :) 
 
 # Credit
 I'll be happy if you put a credit for this work. If you use this Python library, you must also put credit to the Pushshift team that provides the Reddit submissions (https://files.pushshift.io/reddit/submissions/) and comments (https://files.pushshift.io/reddit/comments/) data. If you processing a huge Reddit dataset using their provided dataset, you can also consider giving them donations: https://pushshift.io/donations/.

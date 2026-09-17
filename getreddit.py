@@ -1,10 +1,37 @@
 from utilities import *
-from getcontents import get_contents
-from getsubreddits import get_subreddit_list
-from splitcontents import split_contents
+from getcontents import filter_files, resolve_input_files, TEXT_FIELDS
+# getsubreddits (browser scraping) and splitcontents (spaCy) are imported only by the modes
+# that need them, so filtering does not require those dependencies and worker processes stay light.
 import argparse
+import glob
 import os
+import re
 import pandas as pd
+
+# Whether input_path points at Reddit dump(s): a .zst file, a folder with .zst files, or a glob pattern
+def is_zst_input(input_path):
+    if '.zst' in input_path:
+        return True
+    return os.path.isdir(input_path) and len(glob.glob(os.path.join(input_path, "*.zst"))) > 0
+
+# Default attribute to split when 'filter_type' is not set: 'body' for a file filtered from a Reddit
+# Comment (RC) dump and 'title' for a file filtered from a Reddit Submission (RS) dump. The dump name
+# is kept in the name of the filtered file, e.g. subreddit_olympics_RC_2022-10.pickle
+def default_split_column(filename, mode):
+    match = re.search(r'(?:^|_)(RC|RS)_\d{4}-\d{2}', filename)
+    if match:
+        reddit_type = match.group(1)
+    elif "RC" in filename:
+        reddit_type = "RC"
+    elif "RS" in filename:
+        reddit_type = "RS"
+    else:
+        raise ValueError(f"Cannot tell whether {filename} contains Reddit comments or submissions from its name. Please set the 'filter_type' parameter to the attribute that you want to split (e.g. 'body' or 'title').")
+    if reddit_type == "RC":
+        print(f"You are running {mode} mode but you do not set the 'filter_type' parameter and we detect that you are trying to split a Reddit Comment (RC) file so that it automatically to be set as 'body'.")
+        return "body"
+    print(f"You are running {mode} mode but you do not set the 'filter_type' parameter and we detect that you are trying to split a Reddit Submission (RS) file so that it automatically to be set as 'title'.")
+    return "title"
 
 # The main function for end-to-end used that can be called instantly from the terminal
 def main(args):
@@ -13,13 +40,17 @@ def main(args):
     if mode == "":
         if args.url_path != "":
             mode = "download"
-            url_path = args.url_path
-        elif '.zst' in args.input_path:
+        elif is_zst_input(args.input_path):
             mode = "filter"
         elif args.input_path != "":
             mode = "split"
         else:
             raise ValueError("Please set the 'mode' argument. Choose 'download', 'filter', 'split', or 'subreddit_list'.")
+    url_path = args.url_path
+    # Set argument for delete_file: files that you saved yourself ('filter' mode) are kept by default
+    delete_file = args.delete_file
+    if delete_file == "":
+        delete_file = "no" if mode == "filter" else "yes"
     # Set default filter_type
     filter_type = args.filter_type
     if filter_type == "":
@@ -29,13 +60,7 @@ def main(args):
         elif mode == "subreddit_list":
             filter_type = "subreddit_list"
             print(f"You are running {mode} mode but you do not set the 'filter_type' parameter so that it automatically to be set as 'subreddit_list'.")
-        else:
-            if "RC" in f:
-                filter_type = "body"
-                print(f"You are running {mode} mode but you do not set the 'filter_type' parameter and we detect that you are trying to split a Reddit Comment (RC) file so that it automatically to be set as 'body'.")
-            elif "RS" in f:
-                filter_type = "title"
-                print(f"You are running {mode} mode but you do not set the 'filter_type' parameter and we detect that you are trying to split a Reddit Submission (RS) file so that it automatically to be set as 'title'.")
+        # 'split' mode: the default is decided per file inside the split loop, see default_split_column()
     # Set argument for filter_list
     filter_list = args.filter_list
     if filter_list == "":
@@ -53,11 +78,10 @@ def main(args):
         df_filter_list = pd.read_pickle(filter_list)
         filter_list = list(df_filter_list[filter_type])
     else:
-        try:
-            filter_list = filter_list.split(',')
+        filter_list = [flt.strip() for flt in filter_list.split(',') if flt.strip()]
+        # Underscores stand for spaces in multi-word phrases; names such as subreddits keep them
+        if filter_type in TEXT_FIELDS:
             filter_list = [flt.replace('_',' ') for flt in filter_list]
-        except:
-            raise ValueError("Wrong filter_list declaration. Please correct it. Run 'python getreddit.py -h' for the help.")
     # Set argument for input_path
     input_path = args.input_path
     # Set argument for output_path
@@ -68,44 +92,35 @@ def main(args):
 
     # Process for 'download' or 'filter' mode
     if mode == "download" or mode == "filter":
-        # Set argument for reddit_type
-        if ("RC" in args.url_path) or ("RC" in args.input_path):
-            reddit_type = "comment"
-        elif ("RS" in args.url_path) or ("RS" in args.input_path):
-            reddit_type = "submission"
-        else:
-            raise ValueError("Wrong url_path or input_path. Make sure that you corectly set the url_path or input_path argument to download/filter a particular month of Reddit data.")
-        # Set argument for attribute
+        # Set argument for attribute (None: the default attributes for comments or submissions,
+        # decided per file, since the type of each file is detected from its name)
         attribute_list = args.attribute_list
         if attribute_list == "":
-            if reddit_type == "comment":
-                attribute_list = ["id","subreddit","body"]
-            else:
-                attribute_list = ["id","subreddit","title"]
+            attribute_list = None
         else:
-            try:
-                attribute_list = attribute_list.split(',')
-            except:
-                raise ValueError("Wrong attribute_list declaration. Please correct it.")
+            attribute_list = [att.strip() for att in attribute_list.split(',') if att.strip()]
         # Download the Reddit data for 'download' mode
         if mode == "download":
             if input_path != "":
                 if input_path[-1] != "/":
                     input_path = input_path+"/"
             download(url_path,input_path)
-            file_path = input_path+get_filename(url_path)
+            files = [input_path+get_filename(url_path)]
         else:
-            file_path = input_path
-        get_contents(reddit_type,file_path,filter_list,filter_type,attribute_list,args.add_detail,output_path,args.save_type,"save_file")
-        if args.delete_file == "yes":
-            remove(file_path)
+            files = resolve_input_files(input_path)
+        filter_files(files,filter_list,filter_type,attribute_list,args.add_detail,output_path,args.save_type,
+                     match_mode=args.match_mode or None,workers=args.workers,verbose=args.verbose == "yes")
+        if delete_file == "yes":
+            for file_path in files:
+                remove(file_path)
             print("The entire process to collect and/or filter the Reddit data has been done.")
         else:
             print("The entire process to collect and/or filter the Reddit data has been done.")
-            print("You choose to not remove the original downloaded Reddit data. Beware that the original file may be very big and make your storage full.")
-    
+            print("The original Reddit data file(s) are kept. Beware that the original file may be very big and make your storage full.")
+
     # Process for 'subreddit_list' mode
     elif mode == "subreddit_list":
+        from getsubreddits import get_subreddit_list
         get_top_subreddit = args.get_top_subreddit
         if get_top_subreddit == 0:
             get_top_subreddit = "all"
@@ -113,6 +128,7 @@ def main(args):
 
     # Process for 'split' mode
     else:
+        from splitcontents import split_contents
         if (input_path == "") or (".zst" in input_path):
             raise ValueError("You are in 'split' mode. Please re-check your input_path argument. The input_path argument must be the path to the folder that contains the list of filtered Reddit file.")
         if input_path[-1] == "/":
@@ -123,6 +139,10 @@ def main(args):
             f = os.path.join(input_path, filename)
             if os.path.isfile(f):
                 if args.save_type in f:
+                    # Set the attribute to split, from the file name when 'filter_type' is not set
+                    split_column = filter_type
+                    if split_column == "":
+                        split_column = default_split_column(filename, mode)
                     if args.save_type == "pickle":
                         dataset = pd.read_pickle(f)
                     elif args.save_type == "excel":
@@ -132,15 +152,15 @@ def main(args):
                     else:
                         raise ValueError("Wrong save_type argument. Only 'pickle', 'excel', or 'csv' that is allowed to be used as save_type argument.")
                     print(f'Processing the file {file_idx} of {num_of_files} i.e. file {f} ...')
-                    df = split_contents(dataset,filter_type,args.verbose,file_idx,num_of_files)
+                    df = split_contents(dataset,split_column,args.verbose,file_idx,num_of_files)
                     sentences_to_file(df,f,output_path,args.save_type)
-                    if args.delete_file == "yes":
+                    if delete_file == "yes":
                         remove(f)
                         print("The original filtered data {f} is removed.")
                     print(f'Processing the file {file_idx} of {num_of_files} i.e. file {f} is done. The splitted sentence file is saved in {output_path}splitted_{get_filename(f)}')
             file_idx += 1
         print("The entire process to split the filtered Reddit data has been done.")
-        if args.delete_file == "no":
+        if delete_file == "no":
             print("You choose to not remove the original filtered Reddit data. Beware that the original filtered file may be very big and make your storage full.")
 
 if __name__ == "__main__":
@@ -158,7 +178,7 @@ if __name__ == "__main__":
         type=str, default=""
     )
     parser.add_argument(
-        "--input_path", help="The folder path to store the original downloaded file (mode 'download'), or the original downloaded file location that you want to filter (mode 'filter'), or the folder path which contain the list of filtered data that you want to split based on the sentence (mode 'split').",
+        "--input_path", help="The folder path to store the original downloaded file (mode 'download'), or the downloaded .zst file that you want to filter, a folder containing several .zst files, or a glob pattern such as '/data/RC_2022-*.zst' (mode 'filter'), or the folder path which contain the list of filtered data that you want to split based on the sentence (mode 'split').",
         type=str, default=""
     )
     parser.add_argument(
@@ -186,8 +206,16 @@ if __name__ == "__main__":
         type=str, default=""
     )
     parser.add_argument(
-        "--delete_file", help="The option to delete ('yes') the Reddit original file or not ('no').",
-        type=str, default="yes"
+        "--delete_file", help="The option to delete ('yes') the Reddit original file or not ('no'). By default the original file is deleted only in 'download' mode; files that you saved yourself ('filter' mode) are kept.",
+        type=str, default=""
+    )
+    parser.add_argument(
+        "--match_mode", help="How the filter values are compared with the 'filter_type' attribute (mode 'download' or 'filter'): 'exact' means the attribute must be equal to a filter value (the default for 'subreddit' and any other non-text attribute), 'contains' means the attribute must contain a filter value as a substring (the default for 'body', 'title', and 'selftext'). The comparison ignores the case of ASCII letters.",
+        choices=["exact","contains"], type=str, default=""
+    )
+    parser.add_argument(
+        "--workers", help="The number of .zst files that are filtered in parallel when input_path is a folder or a glob pattern (mode 'filter'). Each worker needs up to 2 GB of memory to decompress a Reddit dump, plus the memory of the records it keeps.",
+        type=int, default=1
     )
     parser.add_argument(
         "--get_top_subreddit", help="The top subreddit list that you want to collect for each query. This option only used for 'subreddit_list' mode. Leave this parameter blank or set 0 to collect all subreddit list from each query",

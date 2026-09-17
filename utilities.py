@@ -73,23 +73,25 @@ def save_to_file(merged_dataframe,filter_list,filter_type,input_path,output_fold
             print(f'There is no Reddit {filter_type} data that contains {flt} in the input_path {input_path}.')
 
 def single_df_to_file(df,filter_type,flt,filter_name,input_path,output_folder_path,save_type):
+    # Returns the path of the saved file, or None when there was nothing to save
     if len(df) != 0:
+        if filter_type == "subreddit_list":
+            saved_file_name = output_folder_path+filter_name+"."+save_type
+        else:
+            saved_file_name = output_folder_path+filter_name+"_"+get_stringname(get_filename(input_path))+"."+save_type
+        if save_type not in ("xlsx","csv","pickle"):
+            raise ValueError("Wrong save_type. Only 'xlsx', 'csv', or 'pickle' are allowed to be used as save_type.")
         try:
-            if filter_type == "subreddit_list":
-                saved_file_name = output_folder_path+filter_name+"."+save_type
-            else:
-                saved_file_name = output_folder_path+filter_name+"_"+get_stringname(get_filename(input_path))+"."+save_type
             if save_type == "xlsx":
                 df.to_excel(saved_file_name, index=False)
             elif save_type == "csv":
                 df.to_csv(saved_file_name, index=False)
-            elif save_type == "pickle":
+            else:
                 with open(saved_file_name, 'wb') as handle:
                     pickle.dump(df, handle, protocol=pickle.HIGHEST_PROTOCOL)
-            else:
-                raise ValueError("Wrong save_type. Only 'xlsx', 'csv', or 'pickle' are allowed to be used as save_type.")
-        except:
-            raise ValueError("Cannot save the file into the output_folder_path defined. Make sure the output_folder_path is correct.")
+        except Exception as e:
+            raise ValueError(f"Cannot save the file {saved_file_name}. Make sure the output_folder_path is correct ({e}).") from e
+        return saved_file_name
     else:
         if filter_type == "subreddit_list":
             print(f'Cannot get subreddit that contains/discusses {flt}.This maybe because there is no subreddit that contains/discusses {flt}, internet problem connection problem, the scrapper getting blocked, or the Reddit HTML sctructure has been changed.')
