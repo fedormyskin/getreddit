@@ -22,13 +22,15 @@ Suppose that you have downloaded the October 2022 Reddit comment (https://files.
 ```
 $ python getreddit.py --input_path /Users/username/folder/input_folder/RC_2022-10.zst --output_path /Users/username/folder/filtered/ --filter_list olympics,programming --attribute_list id,subreddit,author,body
 ```
-The `input_path` can also be a folder that contains several `.zst` files, or a glob pattern such as `'/Users/username/folder/input_folder/RC_2022-*.zst'`. Every file is filtered independently and produces its own output files (e.g. `subreddit_olympics_RC_2022-10.pickle`), so you can process several files at the same time with `--workers`:
+The `input_path` can also be a folder that contains several `.zst` files, a glob pattern such as `'/Users/username/folder/input_folder/RC_2022-*.zst'`, or a `.txt` file listing the dumps to filter, one path per line. Every file is filtered independently and produces its own output files (e.g. `subreddit_olympics_RC_2022-10.pickle`), so you can process several files at the same time with `--workers`:
 ```
 $ python getreddit.py --input_path /Users/username/folder/input_folder/ --output_path /Users/username/folder/filtered/ --filter_list olympics,programming --workers 4
 ```
 Each worker needs up to 2 GB of memory to decompress a Reddit dump (they are compressed with a 2 GB zstd window), plus the memory of the records it keeps.
 
 The `.zst` files may also be on another machine that you can reach with `ssh`, without installing anything there: give the `input_path` as `user@server:/path/to/dumps/` (a file, a folder, or a glob pattern; absolute paths). Each file is then streamed with `ssh user@server cat ...` and decompressed and filtered on your machine, where the output files are written. Set up SSH keys or a `ControlMaster` connection so that you are not asked for a password for every file, and keep `--workers` low (1 or 2) since the connection bandwidth is shared.
+
+By default only `id`, `subreddit`, and `body` (comments) or `title` (submissions) are kept. To keep every attribute of the matching records exactly as they are in the dump (including nested ones such as `media` or `all_awardings`), use `--attribute_list all --save_type jsonl`: the output is then one JSON record per line, which you can read with `pandas.read_json(path, lines=True)` or any JSON tool. `csv` and `xlsx` flatten nested attributes into text and lose the types, and `pickle` files depend on the pandas version that wrote them.
 
 Subreddit names are matched exactly (`programming` does not match `learnprogramming`), ignoring the case of ASCII letters; a leading `r/` is accepted. Filters on text attributes (`body`, `title`, `selftext`) match substrings instead, also ignoring the case, and underscores in the `filter_list` stand for spaces (`climate_change`). Use `--match_mode exact` or `--match_mode contains` to override these defaults. The original `.zst` files that you saved are kept unless you pass `--delete_file yes`.
 

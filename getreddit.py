@@ -8,10 +8,10 @@ import os
 import re
 import pandas as pd
 
-# Whether input_path points at Reddit dump(s): a .zst file, a folder with .zst files, or a glob pattern,
-# on this machine or on another one reachable with ssh (user@server:/path)
+# Whether input_path points at Reddit dump(s): a .zst file, a folder with .zst files, a glob pattern,
+# or a .txt file listing them, on this machine or on another one reachable with ssh (user@server:/path)
 def is_zst_input(input_path):
-    if '.zst' in input_path or split_remote(input_path):
+    if '.zst' in input_path or input_path.endswith('.txt') or split_remote(input_path):
         return True
     return os.path.isdir(input_path) and len(glob.glob(os.path.join(input_path, "*.zst"))) > 0
 
@@ -182,7 +182,7 @@ if __name__ == "__main__":
         type=str, default=""
     )
     parser.add_argument(
-        "--input_path", help="The folder path to store the original downloaded file (mode 'download'), or the downloaded .zst file that you want to filter, a folder containing several .zst files, or a glob pattern such as '/data/RC_2022-*.zst' (mode 'filter'; the files may be on another machine reachable with ssh, e.g. 'user@server:/data/dumps/', they are then read over ssh and filtered here without installing anything there), or the folder path which contain the list of filtered data that you want to split based on the sentence (mode 'split').",
+        "--input_path", help="The folder path to store the original downloaded file (mode 'download'), or the downloaded .zst file that you want to filter, a folder containing several .zst files, or a glob pattern such as '/data/RC_2022-*.zst' (mode 'filter'; the files may be on another machine reachable with ssh, e.g. 'user@server:/data/dumps/', they are then read over ssh and filtered here without installing anything there; a .txt file with one such path per line filters exactly the listed dumps), or the folder path which contain the list of filtered data that you want to split based on the sentence (mode 'split').",
         type=str, default=""
     )
     parser.add_argument(
@@ -190,7 +190,7 @@ if __name__ == "__main__":
         type=str, default=""
     )
     parser.add_argument(
-        "--save_type", help="The file extension type that you want to store your output files.",
+        "--save_type", help="The file type of the output files: 'pickle' (default), 'csv', 'xlsx', or 'jsonl' (mode 'download' or 'filter' only: one JSON record per line, exactly as in the Reddit dump, with all its nested attributes; use it with '--attribute_list all' to keep everything).",
         type=str, default="pickle"
     )
     parser.add_argument(

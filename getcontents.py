@@ -37,13 +37,17 @@ from multiprocessing import Pool
 import pandas as pd
 import zstandard
 
-from utilities import single_df_to_file
+from utilities import get_filename, get_stringname, single_df_to_file
 
 try:
     import orjson
     _json_loads = orjson.loads
+    _json_dumps = orjson.dumps
 except ImportError:  # optional, but several times faster than the stdlib
     _json_loads = json.loads
+
+    def _json_dumps(obj):
+        return json.dumps(obj, ensure_ascii=False).encode("utf-8")
 
 # Attributes holding free text. Filters on these default to substring matching
 # and, on the command line, underscores in the filter values are read as spaces.
@@ -58,6 +62,8 @@ CHUNK_SIZE = 1 << 22  # target size of the decompressed chunks handed to the sca
 READ_SIZE = 1 << 19  # bytes of compressed data read from the file at a time
 SWITCH_INTERVAL = 0.00005  # interpreter thread switch interval while a file is read (see _iter_chunks_threaded)
 PROGRESS_EVERY = 30  # seconds between progress lines
+SCHEMA_SAMPLE = 1000  # records inspected up front to validate the requested attributes
+SAVE_TYPES = ("xlsx", "csv", "pickle", "jsonl")
 
 # Matching ignores the case of ASCII letters only, on both the raw bytes and the
 # parsed strings, so the byte-level pre-filter and the verification agree exactly.
@@ -126,8 +132,19 @@ def resolve_input_files(input_path):
     """Expand a .zst file, a folder holding .zst files, or a glob pattern into a sorted file list.
 
     The path may be on another machine reachable with ssh: user@server:/data/RC_2022-10.zst,
-    user@server:/data/dumps/ or 'user@server:/data/RC_2022-*.zst'.
+    user@server:/data/dumps/ or 'user@server:/data/RC_2022-*.zst'. A local .txt file lists
+    inputs of any of these kinds, one per line (empty lines and lines starting with # are skipped).
     """
+    if input_path.endswith(".txt") and os.path.isfile(input_path):
+        files = []
+        with open(input_path, encoding="utf-8") as fh:
+            for line in fh:
+                entry = line.strip()
+                if entry and not entry.startswith("#"):
+                    files.extend(f for f in resolve_input_files(entry) if f not in files)
+        if not files:
+            raise ValueError(f"The list {input_path} does not name any .zst file.")
+        return files
     remote = split_remote(input_path)
     if remote:
         host, path = remote
@@ -410,25 +427,40 @@ def _sanitize_name(flt):
     return name.replace("/", "_").replace("\\", "_")
 
 
-def _check_schema(line, filter_type, attribute, file_path):
-    """Fail fast on a mistyped filter attribute instead of after a long scan."""
-    try:
-        obj = _json_loads(line)
-    except Exception:
+def _check_schema(lines, filter_type, attribute, file_path):
+    """Fail fast on a mistyped filter attribute instead of after a long scan.
+
+    Several records are inspected because not every record carries every
+    attribute (e.g. promoted posts in submission dumps have no 'subreddit').
+    """
+    seen = set()
+    for line in lines:
+        try:
+            obj = _json_loads(line)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            seen.update(obj)
+    if not seen:
         return
-    if not isinstance(obj, dict):
-        return
-    if filter_type is not None and filter_type not in obj:
+    if filter_type is not None and filter_type not in seen:
         raise ValueError(
-            f"The attribute '{filter_type}' (filter_type) does not exist in the records of "
-            f"{file_path}. Available attributes: {', '.join(sorted(obj))}."
+            f"The attribute '{filter_type}' (filter_type) does not exist in the first {len(lines)} records of "
+            f"{file_path}. Available attributes: {', '.join(sorted(seen))}."
         )
-    missing = [att for att in attribute if att not in obj]
+    missing = [att for att in attribute if att not in seen]
     if missing:
         print(
-            f"Warning: the attribute(s) {', '.join(missing)} are not present in the first record of "
-            f"{file_path}; they will be empty (None) where missing.", flush=True
+            f"Warning: the attribute(s) {', '.join(missing)} are not present in the first {len(lines)} records "
+            f"of {file_path}; they will be empty (None) where missing.", flush=True
         )
+
+
+def _save_jsonl(records, encode, saved_file_name):
+    with open(saved_file_name, "wb") as fh:
+        for record in records:
+            fh.write(encode(record))
+            fh.write(b"\n")
 
 
 def get_contents(reddit_type, file_path, filter_list, filter_type, attribute, add_detail,
@@ -447,8 +479,8 @@ def get_contents(reddit_type, file_path, filter_list, filter_type, attribute, ad
         raise ValueError("Wrong 'return_type' parameter. Only 'save_file' or 'merged_df' are allowed.")
     if return_type == "save_file":
         # Checked before the scan so that a wrong option does not surface after a long run
-        if save_type not in ("xlsx", "csv", "pickle"):
-            raise ValueError("Wrong save_type. Only 'xlsx', 'csv', or 'pickle' are allowed to be used as save_type.")
+        if save_type not in SAVE_TYPES:
+            raise ValueError("Wrong save_type. Only 'xlsx', 'csv', 'pickle', or 'jsonl' are allowed to be used as save_type.")
         if output_path:
             os.makedirs(output_path, exist_ok=True)
     if reddit_type is None:
@@ -465,6 +497,10 @@ def get_contents(reddit_type, file_path, filter_list, filter_type, attribute, ad
     matcher = _Matcher(filters, filter_type, match_mode) if filters else None
     buckets = [[] for _ in filters] or [[]]
     name = os.path.basename(file_path)
+    # With jsonl output and all attributes the raw lines of the dump are kept and written back
+    # untouched (also lighter in memory than parsed records); otherwise records are parsed.
+    to_jsonl = return_type == "save_file" and save_type == "jsonl"
+    raw_lines = to_jsonl and keep_all and add_detail != "yes"
 
     if verbose:
         if filters:
@@ -483,23 +519,28 @@ def get_contents(reddit_type, file_path, filter_list, filter_type, attribute, ad
     try:
         for buf, lo, hi in iter_line_buffers(file_path):
             if first:
-                end = buf.find(b"\n", lo, hi)
-                _check_schema(buf[lo:hi if end < 0 else end], filter_type if filters else None, attribute, file_path)
+                sample = buf[lo:hi].split(b"\n", SCHEMA_SAMPLE)[:SCHEMA_SAMPLE]
+                _check_schema(sample, filter_type if filters else None, attribute, file_path)
                 first = False
             n_bytes += hi - lo
             if matcher is None:
                 bucket = buckets[0]
                 for line in buf[lo:hi].split(b"\n"):
-                    if line:
-                        obj = loads(line)
-                        bucket.append(obj if keep_all else [obj.get(att) for att in attribute])
+                    if not line:
+                        continue
+                    if raw_lines:
+                        bucket.append(line)
+                        continue
+                    obj = loads(line)
+                    bucket.append(obj if keep_all else [obj.get(att) for att in attribute])
             else:
                 match = matcher.match
                 for start, end in matcher.candidates(buf, lo, hi):
-                    obj = loads(buf[start:end])
+                    line = buf[start:end]
+                    obj = loads(line)
                     i = match(obj)
                     if i >= 0:
-                        buckets[i].append(obj if keep_all else [obj.get(att) for att in attribute])
+                        buckets[i].append(line if raw_lines else obj if keep_all else [obj.get(att) for att in attribute])
             if verbose:
                 now = time.monotonic()
                 if now - last_report >= PROGRESS_EVERY:
@@ -517,20 +558,37 @@ def get_contents(reddit_type, file_path, filter_list, filter_type, attribute, ad
         print(f"[{name}] done: {n_bytes / 1e9:.1f} GB scanned, {n_matched:,} records matched "
               f"in {elapsed:.0f}s ({rate:.0f} MB/s)", flush=True)
 
-    # Build one DataFrame per filter and save or return them
+    # Save one file per filter (or return one DataFrame per filter)
     frames = []
     counts = {}
     for i, flt in enumerate(filters or ["alldata"]):
         records = buckets[i]
-        buckets[i] = None  # release the records while the frame is built
+        buckets[i] = None  # release the records while the output is built
+        counts[flt] = len(records)
+        filter_name = filter_type + "_" + _sanitize_name(flt) if filters else "alldata"
+        if to_jsonl:
+            if not records:
+                print(f"There is no Reddit {filter_type} data that contains {flt} in the input_path {file_path}.", flush=True)
+                continue
+            detail = {"type": reddit_type, "filter": flt if filters else "no_filter"} if add_detail == "yes" else {}
+            if raw_lines:
+                encode = lambda line: line
+            elif keep_all:
+                encode = lambda obj: _json_dumps({**detail, **obj})
+            else:
+                encode = lambda values: _json_dumps({**detail, **dict(zip(attribute, values))})
+            saved = output_path + filter_name + "_" + get_stringname(get_filename(file_path)) + ".jsonl"
+            _save_jsonl(records, encode, saved)
+            if verbose:
+                print(f"[{name}] {len(records):,} records for {filter_type} '{flt}' saved in {saved}", flush=True)
+            del records
+            continue
         df = pd.DataFrame(records) if keep_all else pd.DataFrame(records, columns=attribute)
         del records
         if add_detail == "yes":
             df.insert(0, "type", reddit_type)
             df.insert(1, "filter", flt if filters else "no_filter")
-        counts[flt] = len(df)
         if return_type == "save_file":
-            filter_name = filter_type + "_" + _sanitize_name(flt) if filters else "alldata"
             saved = single_df_to_file(df, filter_type, flt, filter_name, file_path, output_path, save_type)
             if verbose and saved:
                 print(f"[{name}] {len(df):,} records for {filter_type} '{flt}' saved in {saved}", flush=True)
